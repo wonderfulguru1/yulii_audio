@@ -87,13 +87,10 @@ export async function POST(req: NextRequest) {
     const transcript = transcription as unknown as string;
 
     // Step 2: Extract structured deal info from transcript
-    const extraction = await openai.chat.completions.create({
-      model: "gpt-4o",
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content: `You are a deal information extractor. Extract deal details from audio transcripts and return a JSON object with exactly these fields:
+    const extractionMessages: OpenAI.Chat.ChatCompletionMessageParam[] = [
+      {
+        role: "system",
+        content: `You are a deal information extractor. Extract deal details from audio transcripts and return a JSON object with exactly these fields:
 
 - deal_name: string | null — the name or title of the deal
 - description: string | null — a description of the deal; if not explicitly mentioned, generate a compelling one from context; set null only if there is not enough context
@@ -102,12 +99,17 @@ export async function POST(req: NextRequest) {
 - image_description: string | null — if the speaker described or mentioned a specific picture/image they want (e.g. "use a burger image", "show a red car"), capture that description; otherwise null
 
 Only set a field to null if it is truly absent and cannot be reasonably inferred.`,
-        },
-        {
-          role: "user",
-          content: `Transcript: "${transcript}"`,
-        },
-      ],
+      },
+      {
+        role: "user",
+        content: `Transcript: "${transcript}"`,
+      },
+    ];
+
+    const extraction = await openai.chat.completions.create({
+      model: "gpt-4o",
+      response_format: { type: "json_object" },
+      messages: extractionMessages,
     });
 
     const deal = JSON.parse(
@@ -152,6 +154,7 @@ Only set a field to null if it is truly absent and cannot be reasonably inferred
       {
         success: true,
         transcript,
+        prompt_sent_to_llm: extractionMessages,
         deal: {
           name: deal.deal_name,
           description: deal.description,

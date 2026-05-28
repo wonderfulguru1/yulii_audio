@@ -1,37 +1,37 @@
 import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
 
-// ─── Config ───────────────────────────────────────────────────────────────────
-// Vercel Hobby:  max 4.5 MB body, 10s timeout
-// Vercel Pro:    max 4.5 MB body, 60s timeout  ← recommended for audio
-// Set this in your Vercel dashboard → Project → Settings → Functions
-export const maxDuration = 60; // seconds (requires Vercel Pro)
+export const maxDuration = 60;
 
-// ─── OpenAI client ────────────────────────────────────────────────────────────
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// ─── Allowed audio MIME types ─────────────────────────────────────────────────
 const ALLOWED_TYPES = [
-  "audio/mpeg",       // .mp3
-  "audio/mp4",        // .m4a
-  "audio/wav",        // .wav
-  "audio/x-wav",      // .wav (alternate)
-  "audio/webm",       // .webm
-  "audio/ogg",        // .ogg
-  "audio/flac",       // .flac
-  "video/mp4",        // .mp4 (Whisper handles video too)
-  "video/webm",       // .webm video
+  "audio/mpeg",
+  "audio/mp4",
+  "audio/wav",
+  "audio/x-wav",
+  "audio/webm",
+  "audio/ogg",
+  "audio/flac",
+  "video/mp4",
+  "video/webm",
 ];
 
-const MAX_FILE_SIZE_MB = 25; // Whisper API limit
+const MAX_FILE_SIZE_MB = 25;
 const MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024;
 
-// ─── Route handler ────────────────────────────────────────────────────────────
+interface DealExtraction {
+  deal_name: string | null;
+  description: string | null;
+  start_time: string | null;
+  reward: string | null;
+  image_description: string | null;
+}
+
 export async function POST(req: NextRequest) {
   try {
-    // 1. Validate Content-Type
     const contentType = req.headers.get("content-type") || "";
     if (!contentType.includes("multipart/form-data")) {
       return NextResponse.json(
@@ -40,7 +40,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 2. Parse the form data
     let formData: FormData;
     try {
       formData = await req.formData();
@@ -51,7 +50,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 3. Extract the audio file (field name: "audio")
     const audioFile = formData.get("audio") as File | null;
     if (!audioFile) {
       return NextResponse.json(
@@ -60,7 +58,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 4. Validate file type
     if (!ALLOWED_TYPES.includes(audioFile.type)) {
       return NextResponse.json(
         {
@@ -71,7 +68,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 5. Validate file size
     if (audioFile.size > MAX_FILE_SIZE_BYTES) {
       return NextResponse.json(
         {
@@ -82,48 +78,96 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 6. Optional: get language hint from form data (e.g. "en", "fr", "yo")
-    const language = (formData.get("language") as string | null) || undefined;
-
-    // 7. Optional: get response format (default: "json")
-    const responseFormat =
-      (formData.get("response_format") as string | null) || "json";
-
-    // 8. Transcribe with Whisper
+    // Step 1: Transcribe audio
     const transcription = await openai.audio.transcriptions.create({
       file: audioFile,
       model: "whisper-1",
-      language,                    // optional ISO-639-1 code
-      response_format: responseFormat as "json" | "text" | "srt" | "vtt" | "verbose_json",
+      response_format: "text",
+    });
+    const transcript = transcription as unknown as string;
+
+    // Step 2: Extract structured deal info from transcript
+    const extraction = await openai.chat.completions.create({
+      model: "gpt-4o",
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content: `You are a deal information extractor. Extract deal details from audio transcripts and return a JSON object with exactly these fields:
+
+- deal_name: string | null — the name or title of the deal
+- description: string | null — a description of the deal; if not explicitly mentioned, generate a compelling one from context; set null only if there is not enough context
+- start_time: string | null — when the deal starts or is available, preserved exactly as mentioned by the speaker
+- reward: string | null — what the customer receives, the reward or benefit of the deal
+- image_description: string | null — if the speaker described or mentioned a specific picture/image they want (e.g. "use a burger image", "show a red car"), capture that description; otherwise null
+
+Only set a field to null if it is truly absent and cannot be reasonably inferred.`,
+        },
+        {
+          role: "user",
+          content: `Transcript: "${transcript}"`,
+        },
+      ],
     });
 
-    // 9. Return result
-    const text =
-      typeof transcription === "string"
-        ? transcription                // text / srt / vtt format
-        : transcription.text;          // json / verbose_json format
+    const deal = JSON.parse(
+      extraction.choices[0].message.content!
+    ) as DealExtraction;
 
+    // Step 3: Validate required fields
+    const missing: string[] = [];
+    if (!deal.deal_name) missing.push("deal name");
+    if (!deal.start_time) missing.push("start time");
+    if (!deal.reward) missing.push("reward");
+
+    if (missing.length > 0) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: `The audio is missing required information: ${missing.join(", ")}.`,
+          missing,
+          transcript,
+        },
+        { status: 422 }
+      );
+    }
+
+    // Step 4: Generate image with DALL-E 3
+    const imagePrompt = deal.image_description
+      ? deal.image_description
+      : `A vibrant, eye-catching promotional marketing image for a deal called "${deal.deal_name}". ${deal.description}. Professional advertising style, no text overlays.`;
+
+    const imageResponse = await openai.images.generate({
+      model: "dall-e-3",
+      prompt: imagePrompt,
+      n: 1,
+      size: "1024x1024",
+      quality: "standard",
+    });
+
+    const imageUrl = imageResponse.data?.[0]?.url ?? null;
+
+    // Step 5: Return structured deal
     return NextResponse.json(
       {
         success: true,
-        text,
-        language: language || "auto-detected",
-        duration_seconds:
-          "duration" in transcription ? transcription.duration : undefined,
-        file: {
-          name: audioFile.name,
-          type: audioFile.type,
-          size_bytes: audioFile.size,
+        transcript,
+        deal: {
+          name: deal.deal_name,
+          description: deal.description,
+          start_time: deal.start_time,
+          reward: deal.reward,
+          image_url: imageUrl,
+          image_source: deal.image_description ? "user_described" : "auto_generated",
         },
       },
       { status: 200 }
     );
   } catch (err: unknown) {
-    // Handle OpenAI API errors gracefully
     if (err instanceof OpenAI.APIError) {
       console.error("OpenAI API error:", err.status, err.message);
       return NextResponse.json(
-        { error: "Transcription failed", detail: err.message },
+        { error: "Processing failed", detail: err.message },
         { status: err.status || 500 }
       );
     }
@@ -136,7 +180,6 @@ export async function POST(req: NextRequest) {
   }
 }
 
-// ─── Health check ─────────────────────────────────────────────────────────────
 export async function GET() {
   return NextResponse.json({
     status: "ok",
@@ -144,5 +187,7 @@ export async function GET() {
     field: "audio",
     max_size_mb: MAX_FILE_SIZE_MB,
     supported_formats: ["mp3", "mp4", "m4a", "wav", "webm", "ogg", "flac"],
+    required_in_audio: ["deal name", "start time", "reward"],
+    optional_in_audio: ["description", "picture description"],
   });
 }

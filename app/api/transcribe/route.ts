@@ -140,14 +140,15 @@ Only set a field to null if it is truly absent and cannot be reasonably inferred
       : `A vibrant, eye-catching promotional marketing image for a deal called "${deal.deal_name}". ${deal.description}. Professional advertising style, no text overlays.`;
 
     const imageResponse = await openai.images.generate({
-      model: "dall-e-3",
+      model: "gpt-image-1",
       prompt: imagePrompt,
       n: 1,
       size: "1024x1024",
-      quality: "standard",
+      quality: "medium",
     });
 
-    const imageUrl = imageResponse.data?.[0]?.url ?? null;
+    const b64 = imageResponse.data?.[0]?.b64_json ?? null;
+    const imageUrl = b64 ? `data:image/png;base64,${b64}` : null;
 
     // Step 5: Return structured deal
     return NextResponse.json(
@@ -160,7 +161,7 @@ Only set a field to null if it is truly absent and cannot be reasonably inferred
           description: deal.description,
           start_time: deal.start_time,
           reward: deal.reward,
-          image_url: imageUrl,
+          image_data: imageUrl,
           image_source: deal.image_description ? "user_described" : "auto_generated",
         },
       },

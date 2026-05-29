@@ -98,7 +98,7 @@ Only set a field to null if it is truly absent and cannot be reasonably inferred
     return NextResponse.json(
       {
         success: true,
-        prompt_sent_to_llm: extractionMessages,
+      //  prompt_sent_to_llm: extractionMessages,
         deal: {
           name: deal.deal_name,
           description: deal.description,

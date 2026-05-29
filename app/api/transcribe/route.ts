@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
+import { put } from "@vercel/blob";
 
 export const maxDuration = 60;
 
@@ -93,7 +94,16 @@ Only set a field to null if it is truly absent and cannot be reasonably inferred
     });
 
     const b64 = imageResponse.data?.[0]?.b64_json ?? null;
-    const imageUrl = b64 ? `data:image/png;base64,${b64}` : null;
+    let imageUrl: string | null = null;
+    if (b64) {
+      const buffer = Buffer.from(b64, "base64");
+      const filename = `deals/${Date.now()}.png`;
+      const blob = await put(filename, buffer, {
+        access: "public",
+        contentType: "image/png",
+      });
+      imageUrl = blob.url;
+    }
 
     return NextResponse.json(
       {

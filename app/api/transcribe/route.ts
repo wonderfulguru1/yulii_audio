@@ -14,56 +14,93 @@ interface DealExtraction {
   start_time: string | null;
   reward: string | null;
   image_description: string | null;
+  image_url: string | null;
 }
 
 export async function POST(req: NextRequest) {
   try {
+    if (!process.env.BLOB_READ_WRITE_TOKEN) {
+      throw new Error("Missing BLOB_READ_WRITE_TOKEN");
+    }
+
     let text: string;
     try {
       const body = await req.json();
       text = body?.text;
     } catch {
-      return NextResponse.json({ error: "Request body must be JSON" }, { status: 400 });
-    }
-
-    if (!text || typeof text !== "string" || !text.trim()) {
       return NextResponse.json(
-        { error: 'Missing required field "text".' },
+        { error: "Request body must be valid JSON" },
         { status: 400 }
       );
     }
 
-    // Step 1: Extract structured deal info from text
+    if (!text || typeof text !== "string" || !text.trim()) {
+      return NextResponse.json(
+        { error: 'Missing required field "text"' },
+        { status: 400 }
+      );
+    }
+
+    // STEP 1: Extract structured deal information
     const extractionMessages: OpenAI.Chat.ChatCompletionMessageParam[] = [
       {
         role: "system",
-        content: `You are a deal information extractor. Extract deal details from text and return a JSON object with exactly these fields:
+        content: `You are an advanced AI deal information extractor. Your task is to extract structured deal information from user text.
 
-- deal_name: string | null — the name or title of the deal
-- description: string | null — a description of the deal; if not explicitly mentioned, generate a compelling one from context; set null only if there is not enough context
-- start_time: string | null — when the deal starts or is available, preserved exactly as mentioned
-- reward: string | null — what the customer receives, the reward or benefit of the deal
-- image_description: string | null — if a specific picture/image is described (e.g. "use a burger image", "show a red car"), capture that description; otherwise null
+IMPORTANT RULES:
+- Return ONLY valid JSON
+- Do NOT return markdown
+- Do NOT wrap the response in \`\`\`
+- Do NOT include explanations
+- Do NOT include extra fields
+- Always return every field
+- Use null only if information truly cannot be inferred
 
-Only set a field to null if it is truly absent and cannot be reasonably inferred.`,
+Return this exact JSON structure:
+{
+  "deal_name": string | null,
+  "description": string | null,
+  "start_time": string | null,
+  "reward": string | null,
+  "image_description": string | null,
+  "image_url": string | null
+}
+
+FIELD RULES:
+deal_name: Extract the title or name of the deal/task
+description: Generate a compelling and clean description — short but meaningful
+start_time: Preserve exactly how the user mentioned the time
+reward: Extract what the user receives after completion
+image_description: If the user mentions an image, poster, object, color, or visual style, capture it — otherwise generate a professional promotional image description
+image_url: Always return null`,
       },
       {
         role: "user",
-        content: `Text: "${text}"`,
+        content: `Extract deal information from this text: ${text}`,
       },
     ];
 
     const extraction = await openai.chat.completions.create({
       model: "gpt-4o",
+      temperature: 0.2,
       response_format: { type: "json_object" },
       messages: extractionMessages,
     });
 
-    const deal = JSON.parse(
-      extraction.choices[0].message.content!
-    ) as DealExtraction;
+    // STEP 2: Safely parse AI response
+    const rawContent = extraction.choices?.[0]?.message?.content;
+    if (!rawContent) {
+      throw new Error("No content returned from OpenAI");
+    }
 
-    // Step 2: Validate required fields
+    let deal: DealExtraction;
+    try {
+      deal = JSON.parse(rawContent);
+    } catch {
+      throw new Error("Invalid JSON returned from OpenAI");
+    }
+
+    // STEP 3: Validate required fields
     const missing: string[] = [];
     if (!deal.deal_name) missing.push("deal name");
     if (!deal.start_time) missing.push("start time");
@@ -73,31 +110,34 @@ Only set a field to null if it is truly absent and cannot be reasonably inferred
       return NextResponse.json(
         {
           success: false,
-          error: `The text is missing required information: ${missing.join(", ")}.`,
+          error: `Missing required information: ${missing.join(", ")}`,
           missing,
         },
         { status: 422 }
       );
     }
 
-    // Step 3: Generate image
+    // STEP 4: Build image prompt
     const imagePrompt = deal.image_description
-      ? deal.image_description
-      : `A vibrant, eye-catching promotional marketing image for a deal called "${deal.deal_name}". ${deal.description}. Professional advertising style, no text overlays.`;
+      ? `${deal.image_description}. High quality promotional advertisement style, vibrant lighting, realistic, modern marketing design, no text overlays.`
+      : `Create a professional promotional advertisement image for a deal called "${deal.deal_name}". Reward: ${deal.reward} Description: ${deal.description} Style: modern marketing banner, realistic, eye-catching, high quality, vibrant lighting, no text overlays.`;
 
+    // STEP 5: Generate image
     const imageResponse = await openai.images.generate({
       model: "gpt-image-1",
       prompt: imagePrompt,
-      n: 1,
       size: "1024x1024",
       quality: "medium",
+      n: 1,
     });
 
-    const b64 = imageResponse.data?.[0]?.b64_json ?? null;
+    const b64 = imageResponse.data?.[0]?.b64_json;
     let imageUrl: string | null = null;
+
+    // STEP 6: Upload image to Vercel Blob
     if (b64) {
       const buffer = Buffer.from(b64, "base64");
-      const filename = `deals/${Date.now()}.png`;
+      const filename = `deals/${Date.now()}-${Math.random().toString(36).substring(2)}.png`;
       const blob = await put(filename, buffer, {
         access: "public",
         contentType: "image/png",
@@ -105,32 +145,35 @@ Only set a field to null if it is truly absent and cannot be reasonably inferred
       imageUrl = blob.url;
     }
 
+    // STEP 7: Return final response
     return NextResponse.json(
       {
         success: true,
-      //  prompt_sent_to_llm: extractionMessages,
         deal: {
           name: deal.deal_name,
           description: deal.description,
           start_time: deal.start_time,
           reward: deal.reward,
-          image_data: imageUrl,
-          image_source: deal.image_description ? "user_described" : "auto_generated",
+          image_description: deal.image_description,
+          image_url: imageUrl,
         },
       },
       { status: 200 }
     );
   } catch (err: unknown) {
     if (err instanceof OpenAI.APIError) {
-      console.error("OpenAI API error:", err.status, err.message);
+      console.error("OpenAI API Error:", err.status, err.message);
       return NextResponse.json(
-        { error: "Processing failed", detail: err.message },
+        { success: false, error: "OpenAI processing failed", detail: err.message },
         { status: err.status || 500 }
       );
     }
 
-    console.error("Unexpected error:", err);
-    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+    console.error("Unexpected Error:", err);
+    return NextResponse.json(
+      { success: false, error: "Internal server error" },
+      { status: 500 }
+    );
   }
 }
 
@@ -138,8 +181,8 @@ export async function GET() {
   return NextResponse.json({
     status: "ok",
     endpoint: "POST /api/transcribe",
-    body: { text: "string — the deal description text" },
-    required_in_text: ["deal name", "start time", "reward"],
-    optional_in_text: ["description", "picture description"],
+    body: { text: "string" },
+    required_fields_in_text: ["deal name", "start time", "reward"],
+    optional_fields_in_text: ["description", "image description"],
   });
 }

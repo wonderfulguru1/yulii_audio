@@ -186,3 +186,4 @@ export async function GET() {
     optional_fields_in_text: ["description", "image description"],
   });
 }
+

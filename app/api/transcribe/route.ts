@@ -1,4 +1,3 @@
-
 import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
 import { put } from "@vercel/blob";
@@ -14,8 +13,6 @@ interface DealExtraction {
   description: string | null;
   start_time: string | null;
   reward: string | null;
-  image_description: string | null; // OPTIONAL now (not trusted)
-  image_url: string | null;
 }
 
 export async function POST(req: NextRequest) {
@@ -38,70 +35,56 @@ export async function POST(req: NextRequest) {
 
     if (!text || typeof text !== "string" || !text.trim()) {
       return NextResponse.json(
-        { error: 'Missing required field "text"' },
+        { error: "Missing required field text" },
         { status: 400 }
       );
     }
 
     // -----------------------------
-    // STEP 1: Extract structured data ONLY
+    // STEP 1: EXTRACT DATA (NO IMAGES HERE)
     // -----------------------------
-    const extractionMessages: OpenAI.Chat.ChatCompletionMessageParam[] = [
-      {
-        role: "system",
-        content: `
-You are a strict deal information extractor.
+    const extraction = await openai.chat.completions.create({
+      model: "gpt-4o",
+      temperature: 0.2,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content: `
+You are a strict deal extractor.
 
-IMPORTANT:
-- Return ONLY valid JSON
-- No markdown
-- No explanations
-- No extra fields
-- Do NOT invent images
-
-Return:
+Return ONLY valid JSON:
 
 {
   "deal_name": string | null,
   "description": string | null,
   "start_time": string | null,
-  "reward": string | null,
-  "image_description": null,
-  "image_url": null
+  "reward": string | null
 }
 
-RULES:
-- Extract only what is explicitly in the text
-- If missing, return null
-- DO NOT generate image descriptions
+Rules:
+- Extract only what exists in the text
+- Do NOT generate images
+- Do NOT invent data
+- Return null if missing
 `,
-      },
-      {
-        role: "user",
-        content: `Extract deal info from this text:\n${text}`,
-      },
-    ];
-
-    const extraction = await openai.chat.completions.create({
-      model: "gpt-4o",
-      temperature: 0.2,
-      response_format: { type: "json_object" },
-      messages: extractionMessages,
+        },
+        {
+          role: "user",
+          content: `Extract from: ${text}`,
+        },
+      ],
     });
 
     const raw = extraction.choices?.[0]?.message?.content;
-
-    if (!raw) {
-      throw new Error("No response from OpenAI");
-    }
+    if (!raw) throw new Error("No OpenAI response");
 
     const deal: DealExtraction = JSON.parse(raw);
 
     // -----------------------------
-    // STEP 2: Validation
+    // STEP 2: VALIDATION
     // -----------------------------
     const missing: string[] = [];
-
     if (!deal.deal_name) missing.push("deal name");
     if (!deal.start_time) missing.push("start time");
     if (!deal.reward) missing.push("reward");
@@ -117,44 +100,92 @@ RULES:
     }
 
     // -----------------------------
-    // STEP 3: IMAGE = DERIVED FROM REWARD ONLY
+    // STEP 3: DEAL IMAGE
     // -----------------------------
-    const imagePrompt = deal.reward
-      ? `Create a high-quality, modern advertising image of: ${deal.reward}.
-         Clean background, realistic lighting, premium marketing style, no text overlays.`
-      : null;
+    let dealImageUrl: string | null = null;
 
-    let imageUrl: string | null = null;
+    const dealPrompt = `
+Create a cinematic image showing the DEAL ACTION.
 
-    if (imagePrompt) {
-      const imageResponse = await openai.images.generate({
-        model: "gpt-image-1",
-        prompt: imagePrompt,
-        size: "1024x1024",
-        quality: "medium",
-        n: 1,
-      });
+Deal: ${deal.deal_name}
+Description: ${deal.description}
 
-      const b64 = imageResponse.data?.[0]?.b64_json;
+Style:
+- realistic
+- cinematic lighting
+- modern advertisement
+- no text
+`;
 
-      if (b64) {
-        const buffer = Buffer.from(b64, "base64");
+    const dealImage = await openai.images.generate({
+      model: "gpt-image-1",
+      prompt: dealPrompt,
+      size: "1024x1024",
+      quality: "medium",
+      n: 1,
+    });
 
-        const filename = `deals/${Date.now()}-${Math.random()
-          .toString(36)
-          .substring(2)}.png`;
+    const dealB64 = dealImage.data?.[0]?.b64_json;
 
-        const blob = await put(filename, buffer, {
+    if (dealB64) {
+      const buffer = Buffer.from(dealB64, "base64");
+
+      const blob = await put(
+        `deals/deal-${Date.now()}.png`,
+        buffer,
+        {
           access: "public",
           contentType: "image/png",
-        });
+        }
+      );
 
-        imageUrl = blob.url;
-      }
+      dealImageUrl = blob.url;
     }
 
     // -----------------------------
-    // STEP 4: RESPONSE
+    // STEP 4: REWARD IMAGE
+    // -----------------------------
+    let rewardImageUrl: string | null = null;
+
+    const rewardPrompt = `
+Create a cinematic luxury product image of the REWARD.
+
+Reward: ${deal.reward}
+
+Style:
+- high-end product photography
+- clean background
+- cinematic lighting
+- no text
+`;
+
+    const rewardImage = await openai.images.generate({
+      model: "gpt-image-1",
+      prompt: rewardPrompt,
+      size: "1024x1024",
+      quality: "medium",
+      n: 1,
+    });
+
+    const rewardB64 = rewardImage.data?.[0]?.b64_json;
+
+    if (rewardB64) {
+      const buffer = Buffer.from(rewardB64, "base64");
+
+      const blob = await put(
+        `deals/reward-${Date.now()}.png`,
+        buffer,
+        {
+          access: "public",
+          contentType: "image/png",
+        }
+      );
+
+      rewardImageUrl = blob.url;
+    }
+
+    // -----------------------------
+    // STEP 5: RESPONSE
     // -----------------------------
     return NextResponse.json({
       success: true,
@@ -163,11 +194,16 @@ RULES:
         description: deal.description,
         start_time: deal.start_time,
         reward: deal.reward,
-        image_url: imageUrl,
-        image_source: "derived_from_reward",
+
+        deal_image_url: dealImageUrl,
+        reward_image_url: rewardImageUrl,
+
+        image_source: "split_deal_reward_images",
       },
     });
   } catch (err: unknown) {
+    console.error(err);
+
     if (err instanceof OpenAI.APIError) {
       return NextResponse.json(
         {
@@ -179,8 +215,6 @@ RULES:
       );
     }
 
-    console.error(err);
-
     return NextResponse.json(
       {
         success: false,
@@ -191,11 +225,12 @@ RULES:
   }
 }
 
+// -----------------------------
+// HEALTH CHECK
+// -----------------------------
 export async function GET() {
   return NextResponse.json({
     status: "ok",
     endpoint: "POST /api/transcribe",
   });
 }
-          
-            
